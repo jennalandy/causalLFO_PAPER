@@ -1,0 +1,331 @@
+---
+title: "Application data processing"
+format: html
+---
+
+## Setup
+
+```{r}
+library(tidyverse)
+library(VariantAnnotation)
+library(GenomicRanges)
+library(biomaRt)
+library(bayesNMF)
+library(readxl)
+library(glue)
+library(bayesNMF) # from github jennalandy/bayesNMF
+```
+
+Use tabix to create a .tbi (Tabix index) file to efficiently access specific regions of the compressed VCF file. This will let us load in a subset of the VCF, which is needed since the full VCF is \<7GB.
+
+```         
+# bash
+module load htslib
+tabix -p vcf /gplab/ICGC-legacy-PCAWG/germline_variations/pcawg8.snps.indels.svs.phased.icgc.v2.controlled.vcf.gz
+```
+
+```{r}
+# change directory locations as applicable
+application_dir <- "/gplab/jlandy/causal_signatures/application"
+germline_data_path <- "/gplab/ICGC-legacy-PCAWG/germline_variations/pcawg8.snps.indels.svs.phased.icgc.v2.controlled.vcf.gz"
+snv_data_path <- "/gplab/ICGC-legacy-PCAWG/WGS_PCAWG_2018_02_09/WGS_PCAWG.96.csv"
+mapping_path <- "/gplab/ICGC-legacy-PCAWG/donors_and_biospecimens/pcawg-data-releases.xlsx"
+
+clinical_path <- "/gplab/ICGC-legacy-PCAWG/clinical_and_histology/pcawg_donor_clinical_August2016_v9.xlsx"
+clinical <- readxl::read_excel(clinical_path)
+
+cosmic <- bayesNMF::get_cosmic()
+
+# in PCAWG supplemental info: "hs37d5 human reference genome"
+# in PCAWG paper: "human reference build hs37d5"
+# aligns with GRCh = 37
+genome <- "hs37d5"
+GRCh <- 37
+```
+
+## Load, process, and subset SNV data
+
+```{r}
+snv_data <- read.csv(snv_data_path)
+
+# separate colnames into histology and sample id
+sample_info <- data.frame(
+  colname = colnames(snv_data)[3:ncol(snv_data)]
+) %>%
+mutate(
+  histology = sapply(colname, function(st) {strsplit(st, "\\.\\.")[[1]][1]}),
+  sample_id = sapply(colname, function(st) {strsplit(st, "\\.\\.")[[1]][2]})
+)
+
+snv_data <- snv_data %>% 
+  mutate(
+    mutation = paste0(
+      substr(Trinucleotide, 1, 1),
+      '[', Mutation.type, ']',
+      substr(Trinucleotide, 3, 3)
+    )
+  ) %>%
+  column_to_rownames("mutation") %>%
+  dplyr::select(-Mutation.type, -Trinucleotide) 
+
+head(sample_info)
+
+# make sure same rows
+stopifnot(length(intersect(rownames(snv_data), rownames(cosmic))) == 96)
+
+# make snv data in same order as cosmic
+snv_data <- snv_data[rownames(cosmic),]
+```
+
+```{r}
+BA_columns <- sample_info %>% filter(histology == 'Breast.AdenoCA') %>% pull(colname)
+M_BA <- as.matrix(snv_data[,BA_columns])
+dim(M_BA)
+```
+
+## Load, process, and subset germline mutations data
+
+```{r}
+# identify positions of BRCA1 and BRCA2 genes
+ensembl <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl", GRCh = GRCh)
+brca_genes <- getBM(
+  attributes = c("chromosome_name", "start_position", "end_position", "external_gene_name"),
+  filters = "external_gene_name",
+  values = c("BRCA1", "BRCA2"),
+  mart = ensembl
+)
+
+# convert to GRanges object
+brca_ranges <- GRanges(
+  seqnames = brca_genes$chromosome_name,
+  ranges = IRanges(start = brca_genes$start_position, end = brca_genes$end_position),
+  names = brca_genes$external_gene_name
+)
+
+# load germline mutations vcf file, subset to mutations in BRCA1 and BRCA2 genes
+param <- ScanVcfParam(which = brca_ranges)
+brca_germline_data <- readVcf(germline_data_path, genome = genome, param = param)
+
+# load all sample ids -- differentiate missing samples vs samples w/o BRCA mutations
+vcf_header <- scanVcfHeader(germline_data_path)
+sample_ids <- samples(vcf_header)
+
+brca_germline_data
+
+# isolate genotypes
+genotypes <- geno(brca_germline_data)$GT
+head(colnames(genotypes))
+
+# validate this includes all samples
+stopifnot(length(colnames(genotypes)) == length(sample_ids))
+```
+
+class: CollapsedVCF dim: 3487 1823 rowRanges(vcf): GRanges with 5 metadata columns: paramRangeID, REF, ALT, QUAL, FILTER info(vcf): DataFrame with 9 columns: SVTYPE, END, CLASS, STRAND, LEN, BKPB, TSLEN, A... info(header(vcf)): Number Type Description\
+SVTYPE 1 String Type of structural variant\
+END 1 Integer End position of the structural variant\
+CLASS 1 String L1 element class (L1, L1HS, L1PA2 or L1PA3)\
+STRAND 1 String Insertion DNA strand (+ or -)\
+LEN 1 Integer Mobile element length\
+BKPB 1 Integer MEI right-most breakpoint position (bkp B). Left-mo... TSLEN 1 Integer Target site duplication (+\_value) or deletion (-\_va... AC A Integer Allele count in genotypes\
+AN 1 Integer Total number of alleles in called genotypes\
+geno(vcf): List of length 1: GT geno(header(vcf)): Number Type Description\
+GT 1 String Phased Genotype
+
+```{r}
+# map normal WGS aliquot IDs (in genotype data) to tumor WGS ICGC specimen IDs (in mutational counts data)
+mapping <- readxl::read_excel(mapping_path)
+sapply(colnames(genotypes), function(id) {id %in% mapping$normal_wgs_aliquot_id}) %>% mean() # 100% of IDs from genotype data in mapping
+sapply(sample_info$sample_id, function(id) {id %in% mapping$tumor_wgs_icgc_specimen_id}) %>% mean() # 93% of IDs from counts data in mapping
+
+
+# subset to Breast AdenoCA
+BA_sample_info <- sample_info %>%
+  filter(colname %in% BA_columns) 
+dim(BA_sample_info)
+  
+BA_sample_info <- BA_sample_info %>%
+  merge(mapping, by.x = 'sample_id', by.y = 'tumor_wgs_icgc_specimen_id')
+dim(BA_sample_info)
+
+# only 56% of breast-adenoCA 
+BA_normal_wgs_in_genotypes <- sapply(BA_sample_info$normal_wgs_aliquot_id, function(id) {id %in% colnames(genotypes)})
+mean(BA_normal_wgs_in_genotypes)
+BA_included = BA_sample_info$normal_wgs_aliquot_id[BA_normal_wgs_in_genotypes]
+BA_excluded = BA_sample_info$normal_wgs_aliquot_id[!BA_normal_wgs_in_genotypes]
+
+# seems like germline mutation info is only included for non-US samples. this matches the text of the PCAWG paper
+mapping %>% 
+  filter(normal_wgs_aliquot_id %in% BA_excluded) %>% 
+  group_by(dcc_project_code) %>%
+  tally()
+
+# exception: also excluded is one UK and one EU sample
+mapping %>% 
+  filter(normal_wgs_aliquot_id %in% BA_excluded) %>%
+  filter(dcc_project_code != "BRCA-US")
+
+# confirm no US samples are included
+mapping %>% 
+  filter(normal_wgs_aliquot_id %in% BA_included)  %>%
+  group_by(dcc_project_code) %>%
+  tally()
+
+# subset genotypes and mutational counts M matrices in same order
+BA_genotype_cols <- BA_sample_info %>% filter(normal_wgs_aliquot_id %in% BA_included) %>% pull(normal_wgs_aliquot_id)
+BA_sbs_cols <- BA_sample_info %>% filter(normal_wgs_aliquot_id %in% BA_included) %>% pull(colname)
+BA_genotypes <- genotypes[,BA_genotype_cols]
+dim(BA_genotypes)
+dim(M_BA)
+M_BA <- M_BA[,BA_sbs_cols]
+dim(M_BA)
+
+write.csv(M_BA, file = file.path(application_dir, "M_BA.csv"), row.names = FALSE)
+```
+
+```{r}
+# subset to likely pathogenic mutations
+# is there clinical significance column? (if annotated with VEP or other)
+variants <- as.data.frame(rowRanges(brca_germline_data))
+annovar_input <- data.frame(
+  Chr = variants$seqnames,
+  Start = variants$start,
+  End = variants$end,
+  Ref = variants$REF,  # Reference allele
+  Alt = sapply(variants$ALT, function(a) {a[1]})   # Alternative allele
+)
+write.table(annovar_input, file.path(application_dir, "variants.avinput"), sep = "\t", row.names = FALSE, col.names = FALSE, quote = FALSE)
+```
+
+Filled out ANNOVAR registration formed and recieved download link in an email. In a root directory:
+
+```         
+wget <link>/annovar.latest.tar.gz
+tar -xvzf annovar.latest.tar.gz
+```
+
+In `annovar` directory: Note: GRCh37 is equivalent to hg19
+
+```         
+module load perl
+perl annotate_variation.pl -buildver hg19 -downdb -webfrom annovar refGene humandb/
+perl annotate_variation.pl -buildver hg19 -downdb -webfrom annovar clinvar_20220320 humandb/
+```
+
+In `causal_signatures/application` directory
+
+```         
+/gplab/jlandy/annovar/table_annovar.pl variants.avinput /gplab/jlandy/annovar/humandb -buildver hg19 -out annotated_variants -remove -protocol refGene,clinvar_20220320 -operation g,f -nastring . -csvout
+```
+
+```         
+## NOTICE: the --polish argument is set ON automatically (use --nopolish to change this behavior)
+
+NOTICE: Processing operation=g protocol=refGene
+
+NOTICE: Running with system command \<annotate_variation.pl -geneanno -buildver hg19 -dbtype refGene -outfile annotated_variants.refGene -exonsort -nofirstcodondel variants.avinput /gplab/jlandy/annovar/humandb\> NOTICE: Output files are written to annotated_variants.refGene.variant_function, annotated_variants.refGene.exonic_variant_function NOTICE: Reading gene annotation from /gplab/jlandy/annovar/humandb/hg19_refGene.txt ... Done with 78239 transcripts (including 18578 without coding sequence annotation) for 28293 unique genes NOTICE: Processing next batch with 3482 unique variants in 3482 input lines NOTICE: Reading FASTA sequences from /gplab/jlandy/annovar/humandb/hg19_refGeneMrna.fa ... Done with 6 sequences WARNING: A total of 465 sequences will be ignored due to lack of correct ORF annotation NOTICE: Variants with invalid input format are written to annotated_variants.refGene.invalid_input
+
+## NOTICE: Running with system command \<coding_change.pl annotated_variants.refGene.exonic_variant_function.orig /gplab/jlandy/annovar/humandb/hg19_refGene.txt /gplab/jlandy/annovar/humandb/hg19_refGeneMrna.fa -alltranscript -out annotated_variants.refGene.fa -newevf annotated_variants.refGene.exonic_variant_function\>
+
+NOTICE: Processing operation=f protocol=clinvar_20220320 NOTICE: Finished reading 5 column headers for '-dbtype clinvar_20220320'
+
+NOTICE: Running system command \<annotate_variation.pl -filter -dbtype clinvar_20220320 -buildver hg19 -outfile annotated_variants variants.avinput /gplab/jlandy/annovar/humandb -otherinfo\> NOTICE: the --dbtype clinvar_20220320 is assumed to be in generic ANNOVAR database format NOTICE: Output file with variants matching filtering criteria is written to annotated_variants.hg19_clinvar_20220320_dropped, and output file with other variants is written to annotated_variants.hg19_clinvar_20220320_filtered NOTICE: Processing next batch with 3482 unique variants in 3487 input lines NOTICE: Database index loaded. Total number of bins is 89951 and the number of bins to be scanned is 167 NOTICE: Scanning filter database /gplab/jlandy/annovar/humandb/hg19_clinvar_20220320.txt...Done NOTICE: Variants with invalid input format are written to annotated_variants.invalid_input ----------------------------------------------------------------- NOTICE: Multianno output file is written to annotated_variants.hg19_multianno.csv
+```
+
+```{r}
+annotated_variants <- read.csv(file.path(application_dir, "annotated_variants.hg19_multianno.csv"))
+
+# mostly non-exonic (.), followed by nonsynonymous SNVs, synonymous SNVs, and frameshift substitutions
+annotated_variants %>% group_by(ExonicFunc.refGene) %>% tally() %>% arrange(-n) %>% head()
+
+# confirms mostly intronic, followed by exonic, UTR, unknown, and upstream
+annotated_variants %>% group_by(Func.refGene) %>% tally() %>% arrange(-n) %>% head()
+
+# labels relating to BRCA1/2 and HBOC
+annotated_variants %>% group_by(CLNDN) %>% tally() %>% arrange(-n) %>% head()
+
+# details on how classification was decided (e.g., reviewed by expert panel)
+annotated_variants %>% group_by(CLNREVSTAT) %>% tally() %>% arrange(-n) %>% head()
+
+# classifies into benign vs pathogenic mutations -- most important for us!
+annotated_variants %>% group_by(CLNSIG) %>% tally() %>% arrange(-n)
+
+# many have BRCA/HBOC tags but are classified as benign -- most are intronic
+annotated_variants  %>%
+  filter(grepl("Breast|Ovarian|Hereditary_breast", CLNDN, ignore.case = TRUE))
+  group_by(CLNSIG, Func.refGene) %>% 
+  tally() %>% 
+  arrange(-n) %>% head()
+
+# a few examples of BRCA/HBOC tags, benign, and exonic
+# scenairos where the variant was observed in individuals with HBOC-related disease, but has been shown to be benign
+annotated_variants  %>%
+  filter(grepl("Breast|Ovarian|Hereditary_breast", CLNDN, ignore.case = TRUE)) %>% 
+  filter(Func.refGene == 'exonic', CLNSIG == 'Benign') %>%
+  pull(CLNDN) %>% head()
+
+# 995 variants are HBOC-related  
+annotated_variants %>%
+  filter(grepl("Breast|Ovarian|Hereditary_breast", CLNDN, ignore.case = TRUE)) %>%
+  dim()
+
+# only 65 are pathogenic or likely pathogenic
+annotated_variants %>%
+  filter(grepl("pathogenic", CLNSIG, ignore.case = TRUE)) %>%
+  dim()
+
+# most pathogenic variants are exonic, either nonsynonymous SNVs or stop gains, 
+# though some are intronic (likley splice site mutations), UTR5 mutations (can impact translation regulation),
+# and upstream (possibly regulatory)
+annotated_variants %>%
+  filter(grepl("pathogenic", CLNSIG, ignore.case = TRUE)) %>%
+  group_by(ExonicFunc.refGene, Func.refGene) %>% 
+  tally() %>% 
+  arrange(-n)
+```
+
+```{r}
+# subset BRCA germline data to pathogenic variants
+variants <- rowRanges(brca_germline_data)
+variants$ALT <- sapply(variants$ALT, function(a) {a[1]})
+variants <- as.data.frame(variants)
+colnames(variants)[colnames(variants) == 'REF'] = 'Ref'
+colnames(variants)[colnames(variants) == 'ALT'] = 'Alt'
+variants <- variants %>%
+  mutate(variant_id = paste(seqnames, start, end, Ref, Alt, sep = "_"))
+head(variants)
+
+pathogenic_annotated_variants <- annotated_variants %>%
+  filter(grepl("pathogenic", CLNSIG, ignore.case = TRUE)) %>%
+  mutate(variant_id = paste(Chr, Start, End, Ref, Alt, sep = "_"))
+
+pathogenic_variants <- variants %>%
+  filter(variant_id %in% pathogenic_annotated_variants$variant_id)
+
+# 8 breast-adenoCA samples have at least one pathogenic germline BRCA mutation
+BA_pathogenic_genotypes <- BA_genotypes[rownames(pathogenic_variants),]
+BA_n_pathogenic_mutations <- apply(BA_pathogenic_genotypes, 2, function(col) {
+  sum(sapply(col, function(c) {grepl("1", c)}))
+})
+table(BA_n_pathogenic_mutations)
+```
+
+```{r}
+BA_T <- BA_n_pathogenic_mutations > 0
+
+data.frame(BA_T) %>%
+  rownames_to_column("normal_wgs_aliquot_id") %>%
+  merge(
+    data.frame(mapping) %>% 
+    dplyr::select(normal_wgs_aliquot_id, tumor_wgs_icgc_specimen_id)
+  ) %>%
+  write.csv(file.path(application_dir, "T_BA.csv"), row.names = FALSE)
+
+clinical %>% 
+  filter(
+    icgc_donor_id %in% T_BA$icgc_donor_id,
+    donor_age_at_diagnosis < 45
+  ) %>%
+  merge(T_BA) %>%
+  dplyr::select(colnames(T_BA)) %>%
+  write.csv("T_BA_sub45.csv")
+```

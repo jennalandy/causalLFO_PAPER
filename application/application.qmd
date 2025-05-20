@@ -1,0 +1,183 @@
+
+```{r}
+.libPaths("~/apps/R_4.1.0/")
+
+library(glue)
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+
+source("../methods.R")
+source("../visualization.R")
+
+library(bayesNMF)
+cosmic <- bayesNMF::get_cosmic()
+
+results_dir <- "application_results"
+color_name = 'custom' #'Paired'
+```
+
+```{r}
+results_files <- list.files(results_dir)
+results_files <- results_files[grepl('.csv',results_files)]
+res <- matrix(nrow = 0, ncol = 7)
+for (file in results_files) {
+  file_parts <- str_split(file, '_')[[1]]
+  method <- paste(file_parts[1:(length(file_parts)-1)], collapse = '_')
+  rank <- as.numeric(str_remove(str_remove(file_parts[length(file_parts)], "rank"), ".csv"))
+
+  bootstrap_ATEs <- read.csv(file.path(results_dir, file))
+  ATE <- bootstrap_ATEs %>% colMeans()
+  lower <- apply(bootstrap_ATEs, 2, function(col) quantile(col, 0.025))
+  upper <- apply(bootstrap_ATEs, 2, function(col) quantile(col, 0.975))
+
+  aligned_Ps <- readRDS(file.path(results_dir, glue("{method}_rank{rank}_aligned_Ps.rds")))
+  mean_P <- Reduce(`+`, aligned_Ps) / length(aligned_Ps)
+  sim <- pairwise_sim(mean_P, cosmic)
+  aligned_sim <- assign_signatures(sim)
+
+  this_res <- data.frame(
+    ATE = ATE,
+    lower = lower,
+    upper = upper,
+    sig = colnames(aligned_sim),
+    sim = diag(aligned_sim),
+    method = method,
+    rank = rank
+  )
+
+  res <- rbind(res, this_res) %>%
+    mutate(
+      method = ifelse(method == "random_split", "random_split_and_nmf", method)
+    )
+}
+write.csv(res, "application_res.csv")
+table(res$method)
+```
+
+```{r}
+fill_colors = list(
+  "SBS3" = 'black',
+  "SBS6" = 'grey'
+)
+
+sig_cos_labels <- res %>%
+  group_by(sig) %>%
+  mutate(
+    sig = factor(sig, levels = c("SBS1","SBS2","SBS3","SBS5","SBS6","SBS13","SBS39","SBS40"))
+  ) %>%
+  arrange(sig) %>%
+  summarize(
+    min = min(sim),
+    mean = mean(sim),
+    max = max(sim)
+  ) %>%
+  mutate(
+    label = paste0(sig, "\n(",round(min, 2), "-", round(max, 2), ")"),
+    label = factor(label)
+  ) %>%
+  select(sig, label)
+
+sim = pairwise_sim(cosmic[,unique(res$sig)], cosmic[,unique(res$sig)])
+sim_df <- as.data.frame(as.table(sim)) %>%
+  merge(
+    sig_cos_labels %>%
+      rename(Var2 = sig, Var2_label = label)
+  ) %>%
+  merge(
+    sig_cos_labels %>%
+      rename(Var1 = sig, Var1_label = label)
+  )
+sim_df$highlight <- sim_df$Freq > 0.7
+sim_tile <- function(sig, label = TRUE) {
+  if (label) {
+    geom_tile(
+      data = sim_df[sim_df$highlight & sim_df$Var1 == sig,], 
+      aes(x = Var2_label, y = ybox, fill = sig), 
+      color = "black", width = 1, height = boxheight
+    ) 
+  } else {
+    geom_tile(
+      data = sim_df[sim_df$highlight & sim_df$Var1 == sig,], 
+      aes(x = Var2, y = ybox, fill = sig), 
+      color = "black", width = 1, height = boxheight
+    )
+  }
+}
+
+ybox = -2500
+boxheight = 500
+res %>%
+  mutate(
+    method = factor(method, levels = names(method_order), labels = method_order),
+    sig = factor(sig, levels = c("SBS1","SBS2","SBS3","SBS5","SBS6","SBS13","SBS39","SBS40")),
+    rank = paste("Rank =", rank)
+  ) %>%
+  merge(
+    sig_cos_labels
+  ) %>%
+  complete(label, method, rank) %>%
+  ggplot(aes(x = label, y = ATE, color = method, group = method)) +
+  facet_grid(rows = vars(rank), switch = 'y') +
+  geom_hline(yintercept = 0) +
+  geom_point(position = position_dodge(width = 1), size = 3) +
+  geom_errorbar(aes(ymin = lower, ymax = upper), position = position_dodge(width = 1), width = 0.5, size = 1.5) +
+  set_colors(name = color_name, subset = unique(res$method)) +
+  sim_tile("SBS3") +
+  sim_tile("SBS6") +
+  scale_fill_manual(
+    values = fill_colors,
+    breaks = names(fill_colors)
+  ) +
+  labs(
+    x = 'Best Matched Reference Signature\n(Range of Cosine Similarity)', color = 'Algorithm', 
+    fill = 'Cosine Sim > 0.7 with',
+    y = "ATE Bootstrap Mean and 95% CI"
+  ) +
+  my_theme() +
+  my_color_legend(order = 1) +
+  theme(
+    legend.position = 'bottom'
+  )
+my_save("application_res.png", height_scale = 2, width_scale = 1.5)
+
+ybox = 0.6
+boxheight = 0.02
+res %>%
+  mutate(
+    method = factor(method, levels = names(method_order), labels = method_order),
+    sig = factor(sig, levels = c("SBS1","SBS2","SBS3","SBS5","SBS6","SBS13","SBS39","SBS40")),
+    rank = paste("Rank =", rank)
+  ) %>%
+  merge(
+    sig_cos_labels
+  )%>%
+  ggplot(aes(x = sig, y = sim, color = method)) +
+  facet_grid(rows = vars(rank), scales = 'free_y', switch = 'y') +
+  geom_point(position = position_dodge(width = 0.8), size = 3) +
+  set_colors(name = color_name, subset = unique(res$method)) +
+  sim_tile("SBS3", label = FALSE) +
+  sim_tile("SBS6", label = FALSE) +
+  scale_fill_manual(
+    values = fill_colors,
+    breaks = names(fill_colors)
+  ) +
+  labs(
+    x = 'Best Matched Reference Signature', color = 'Algorithm', 
+    fill = 'Cosine Sim > 0.7 with', 
+    y = 'Cosine Similarity between Estimated and Reference'
+  ) +
+  my_theme() +
+  my_color_legend(order = 1)  +
+  theme(
+    legend.position = 'bottom'
+  )
+my_save("application_sim.png", height_scale = 2)
+
+get_heatmap(cosmic[,unique(res$sig)], cosmic[,unique(res$sig)]) +
+  labs(
+    x = "Reference Signatures",
+    y = "Reference Signatures"
+  )
+ggsave("application_ref_heatmap.png")
+```

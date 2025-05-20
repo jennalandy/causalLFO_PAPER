@@ -1,0 +1,378 @@
+
+
+```{r}
+.libPaths("~/apps/R_4.1.0/")
+library(glue)
+library(tidyverse)
+library(ggridges)
+library(ggthemes)
+library(gridExtra)
+
+source("../visualization.R")
+color_name = 'custom'
+
+sig_order = c('SBS2','SBS3','SBS6','SBS13','SBS18')
+sim <- readRDS(glue("datasets_0.2/sim_1.rds"))
+```
+
+# Load results
+
+Direct Effects
+```{r}
+dir <- "direct_effects"
+files <- list.files(dir)
+results_files <- files[grepl(".csv", files)]
+bootstrapped_results_files <- results_files[grepl("bootstrapped", results_files)]
+bootstrapped_results <- do.call(rbind, lapply(bootstrapped_results_files, function(file) {
+    method <- str_split(file, "_bootstrapped")[[1]][1]
+    pi <- str_split(str_remove(file, ".csv"), "ATE_")[[1]][2]
+
+    res <- read.csv(file.path(dir, file))
+    res$pi <- pi
+    res$method <- method
+    res$sig <- rep(colnames(P), max(res$sim))
+    return(res)
+})) %>%
+    filter(
+        method %in% names(method_order)
+    ) %>%
+    mutate(
+        sig = factor(sig, levels = simulation_sig_order),
+        method = factor(method, levels = names(method_order), labels = method_order),
+        boot = 'Bootstrap Mean'
+    )
+bootstrapped_results %>%
+    group_by(method) %>%
+    summarize(n = length(unique(sim)))
+
+noboot_results_files <- results_files[!grepl("bootstrapped", results_files)]
+noboot_results <- do.call(rbind, lapply(noboot_results_files, function(file) {
+    method <- str_split(file, "_ATE")[[1]][1]
+    pi <- str_split(str_remove(file, ".csv"), "ATE_")[[1]][2]
+
+    res <- read.csv(file.path(dir, file))
+    res$pi <- pi
+    res$method <- method
+    res$sig <- rep(colnames(P), max(res$sim))
+    return(res)
+})) %>%
+    mutate(
+        sig = factor(sig, levels = simulation_sig_order),
+        method = factor(method, levels = names(method_order), labels = method_order),
+        boot = 'Single Estimate'
+    )
+noboot_results %>%
+    group_by(method) %>%
+    summarize(n = length(unique(sim)))
+```
+
+Indirect Effects
+```{r}
+methods <- c('all_data','random_split_and_nmf','impute','stabilize','impute_and_stabilize')
+dir <- "indirect_effects"
+
+PAIE_0 <- do.call(rbind, lapply(methods, function(method) {
+    read.csv(file.path(dir, method, 'PAIE_0.csv'))
+})) %>%
+    pivot_longer(colnames(sim$params$P), names_to = 'sig', values_to = 'PAIE_0') %>%
+    mutate(
+        sig = factor(sig, levels = simulation_sig_order),
+        method = factor(method, levels = names(method_order), labels = method_order)
+    )
+
+PAIE_1 <- do.call(rbind, lapply(methods, function(method) {
+    read.csv(file.path(dir, method, 'PAIE_1.csv'))
+})) %>%
+    pivot_longer(colnames(sim$params$P), names_to = 'sig', values_to = 'PAIE_1') %>%
+    mutate(
+        sig = factor(sig, levels = simulation_sig_order),
+        method = factor(method, levels = names(method_order), labels = method_order)
+    )
+
+PAIE_imputed_0 <- do.call(rbind, lapply(methods, function(method) {
+    if (grepl('impute', method)) {
+        read.csv(file.path(dir, method, 'PAIE_imputed_0.csv'))
+    }
+})) %>%
+    pivot_longer(colnames(sim$params$P), names_to = 'sig', values_to = 'PAIE_imputed_0') %>%
+    mutate(
+        sig = factor(sig, levels = simulation_sig_order),
+        method = factor(method, levels = names(method_order), labels = method_order)
+    )
+
+PAIE_imputed_1 <- do.call(rbind, lapply(methods, function(method) {
+    if (grepl('impute', method)) {
+        read.csv(file.path(dir, method, 'PAIE_imputed_1.csv'))
+    }
+})) %>%
+    pivot_longer(colnames(sim$params$P), names_to = 'sig', values_to = 'PAIE_imputed_1') %>%
+    mutate(
+        sig = factor(sig, levels = simulation_sig_order),
+        method = factor(method, levels = names(method_order), labels = method_order)
+    )
+```
+
+# Figures
+
+## Motivating example
+
+a) PAIE_0_all_data
+b) PAIE_prop_0_all_data
+c) bootstrapped_mean_across_pi_all_data
+
+
+```{r}
+fig_a <- PAIE_0 %>%
+    filter(method == 'All Data') %>%
+    ggplot(aes(x = sig, y = PAIE_0)) +
+    geom_hline(yintercept = 0) +
+    geom_boxplot() +
+    labs(
+        x = 'Signature', 
+        y = 'PAIE'
+    ) +
+    my_theme()
+
+fig_b <- PAIE_0 %>%
+    filter(method == 'All Data') %>%
+    ggplot(aes(x = prop_abs)) +
+    geom_hline(yintercept = 0) +
+    geom_histogram(aes(y = ..density..), bins = 30, fill = 'lightgrey', color = 'black') +
+    geom_density(linewidth = 1.2) +
+    labs(
+        x = 'Scaled total absolute PAIE', 
+        y = ''
+    ) +
+    my_theme()
+
+comp_results <- bootstrapped_results %>%
+    mutate(
+        transparency = ifelse(pi == 0.2, 0, 0.5),
+        g = paste(method, transparency, sig)
+    ) %>%
+    arrange(method, transparency, sig)
+fig_c <- comp_results %>%
+    dplyr::filter(method == 'All Data') %>%
+    mutate(g = factor(g, levels = unique(comp_results$g))) %>%
+    ggplot(aes(x = sig, y = mean, alpha = transparency, group = g)) +
+    truth_boxplot(show.legend = FALSE) +
+    geom_boxplot(fill = 'grey') +
+    scale_alpha_continuous(breaks = c(0.2, 0.8)) + 
+    labs(
+        x = "Signature",
+        y = "ATE estimate",
+        alpha = "Proportion Treated"
+    ) +
+    my_theme() +
+    guides(
+      alpha = guide_legend(
+        override.aes = list(
+          fill = c("transparent", "black"),  # Add shading to the legend
+          alpha = c(0, 0.5)  # Set alpha values for shading (0 and 0.5)
+        ),
+        title = "Proportion\nTreated"
+      )
+    ) +
+    theme(
+        legend.position = 'right'
+    )
+
+png("paper_figures/motivating.png", width = 10, height = 8, units = "in", res = 300)  # 300 dpi for high quality
+top <- grid.arrange(
+  fig_a + ggtitle("A"),
+  fig_b + ggtitle("B"), 
+  ncol = 2
+)
+grid.arrange(
+    top, 
+    fig_c + ggtitle("C"),
+    ncol = 1
+)
+dev.off()
+```
+
+## Simulation Results -- direct effects
+
+a) bootstrap_mean_0.2
+b) bootstrap_CI_widths_0.2
+
+```{r}
+fig_a <- bootstrapped_results %>%
+    filter(pi == 0.2) %>%
+    ggplot(aes(x = sig, y = mean, color = method, fill = method)) +
+    truth_boxplot(color = 'black', show.legend = FALSE) +
+    geom_boxplot(alpha = 0.1) +
+    labs(
+        x = "Signature",
+        y = "Bootstrapped ATE\nMean",
+        color = "Algorithm:",
+        fill = "Algorithm:"
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme() +
+    theme(legend.position = 'none')
+
+fig_b <- bootstrapped_results %>%
+    filter(pi == 0.2) %>%
+    mutate(width95 = upper95-lower95) %>%
+    ggplot(aes(x = sig, y = width95, color = method, fill = method)) +
+    geom_hline(yintercept = 0) +
+    geom_boxplot(alpha = 0.2) +
+    labs(
+        x = "Signature",
+        y = "Bootstrapped ATE\n95% CI width",
+        color = "Algorithm:",
+        fill = "Algorithm:"
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme() +
+    theme(
+        legend.position = 'bottom'
+    )
+
+png("paper_figures/simulation_direct.png", width = 11, height = 10, units = "in", res = 300)  # 300 dpi for high quality
+grid.arrange(
+    fig_a + ggtitle("A"), 
+    fig_b + ggtitle("B"),
+    ncol = 1, heights = c(1, 1.2)
+)
+dev.off()
+```
+
+## Simulation Results -- indirect effects
+
+a) PAIE_0
+b) PAIE_prop_0
+c) bootstrapped_mean_across_pi
+
+```{r}
+fig_a <- PAIE_0 %>%
+    ggplot(aes(x = sig, y = PAIE_0, color = method)) +
+    geom_hline(yintercept = 0) +
+    geom_boxplot() +
+    labs(
+        x = 'Signature', 
+        y = 'mPAIE',
+        color = 'Algorithm'
+    ) +
+    set_colors(color_name) +
+    my_theme() +
+    my_color_legend() +
+    theme(
+        legend.position = 'none'
+    )
+
+p <- PAIE_0 %>%
+    ggplot(aes(x = prop_abs, y = method, fill = method)) +
+    geom_density_ridges(alpha = 0.5)
+pb <- ggplot_build(p)
+ridge_data <- pb$data[[1]]  
+means <- PAIE_0 %>%
+  group_by(method) %>%
+  summarise(mean_prop_abs = mean(prop_abs), .groups = "drop")
+mean_lines <- means %>%
+  rowwise() %>%
+  mutate(height = {
+    # Find the ridge group number (from ggplot_build, 1-based index)
+    group_index <- which(levels(factor(PAIE_0$method)) == method)
+
+    # Subset ridge data
+    ridge_subset <- ridge_data[ridge_data$group == group_index, ]
+
+    # Interpolate height at mean
+    approx(ridge_subset$x, ridge_subset$height, xout = mean_prop_abs)$y
+  }) %>%
+  ungroup()
+fig_b <- PAIE_0 %>%
+    mutate(
+        method = factor(method, levels = rev(levels(mean_lines$method)))
+    ) %>%
+    ggplot(aes(x = prop_abs, y = method, fill = method, color = method,  height = after_stat(density))) +
+    geom_hline(yintercept = 0) +
+    geom_density_ridges(alpha = 0.5, scale = 1, stat = "density") +
+    geom_segment(
+        data = mean_lines %>%
+            mutate(
+                method = factor(method, levels = rev(levels(mean_lines$method)))
+            ),
+        aes(
+            x = mean_prop_abs,
+            xend = mean_prop_abs,
+            y = as.numeric(factor(method)),
+            yend = as.numeric(factor(method)) + height/ 54, # to get on same scale (by eye)
+            color = method
+        ),
+        inherit.aes = FALSE,
+        size = 1
+    ) + 
+    labs(
+        x = 'Scaled total absolute mPAIE', 
+        y = '',
+        color = 'Algorithm',
+        fill = 'Algorithm'
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme() +
+    my_fill_legend()+
+    theme(
+        legend.position = 'none',
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()
+    ) +
+    scale_y_discrete(expand = expansion(add = c(0.3, 1)))
+
+comp_results <- bootstrapped_results %>%
+    mutate(
+        transparency = ifelse(pi == 0.2, 0, 0.5),
+        g = paste(method, transparency, sig)
+    ) %>%
+    arrange(method, transparency, sig)
+fig_c <- comp_results %>%
+    mutate(g = factor(g, levels = unique(comp_results$g))) %>%
+    ggplot(aes(x = sig, y = mean, color = method, fill = method, alpha = transparency, group = g)) +
+    truth_boxplot() +
+    geom_boxplot(show.legend = FALSE) +
+    scale_alpha_continuous(breaks = c(0.2, 0.8)) + 
+    labs(
+        x = "Signature",
+        y = "ATE estimate",
+        color = "Algorithm:",
+        fill = 'Algorithm:',
+        alpha = "Proportion Treated:"
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme() +
+    guides(
+      alpha = guide_legend(
+        override.aes = list(
+          fill = c("transparent", "black"),  # Add shading to the legend
+          alpha = c(0, 0.5)  # Set alpha values for shading (0 and 0.5)
+        ),
+        title = "(C only) Proportion Treated"
+      )
+    ) +
+    theme(
+        legend.position = 'bottom'
+    ) +
+    my_color_legend(order = 1) +
+    my_fill_legend(order = 1)
+    
+
+png("paper_figures/simulation_indirect.png", width = 11, height = 10, units = "in", res = 300)  # 300 dpi for high quality
+top <- grid.arrange(
+  fig_a + ggtitle("A"),
+  fig_b + ggtitle("B"), 
+  ncol = 2
+)
+grid.arrange(
+    top, 
+    fig_c + ggtitle("C"),
+    ncol = 1,
+    heights = c(1, 1.3)
+)
+dev.off()
+```

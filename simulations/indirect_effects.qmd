@@ -1,0 +1,283 @@
+
+
+```{r}
+.libPaths("~/apps/R_4.1.0/")
+library(glue)
+library(tidyverse)
+library(ggridges)
+library(ggthemes)
+
+source("../visualization.R")
+color_name = 'custom'
+
+sig_order = c('SBS2','SBS3','SBS6','SBS13','SBS18')
+```
+
+```{r eval = FALSE}
+methods <- c('all_data','random_split_and_nmf','impute','stabilize','impute_and_stabilize')
+dir <- "indirect_effects"
+
+compute_PAIE <- function(Cbar, sim, t = 0) {
+    IAIE <- data.frame(t(Cbar[['0.2']] - Cbar[['0.8']]))
+    colnames(IAIE) <- colnames(sim$params$P)
+    if (t == 0) {
+        total_muts = colSums(sim$M0)
+    } else {
+        total_muts = colSums(sim$M1)
+    }
+    IAIE <- IAIE %>%
+        mutate(
+            g = 1:100,
+            total_muts = total_muts,
+            total_abs = rowSums(abs(across(1:5))),
+            prop_abs = total_abs/(2*total_muts)
+        )
+    return(colMeans(IAIE))
+}
+
+for (method in methods) {
+    results_dirs <- list.dirs(file.path(dir, method))
+    results_dirs <- results_dirs[results_dirs!=file.path(dir, method)]
+    
+    PAIE_0 <- matrix(nrow = 0, ncol = 11)
+    PAIE_1 <- matrix(nrow = 0, ncol = 11)
+    PAIE_imputed_0 <- matrix(nrow = 0, ncol = 11)
+    PAIE_imputed_1 <- matrix(nrow = 0, ncol = 11)
+
+    first = TRUE
+    for (results_dir in results_dirs) {
+        results_dir_parts = str_split(results_dir, '/')[[1]]
+        results_dir_name = results_dir_parts[length(results_dir_parts)]
+        results_dir_name_parts = str_split(results_dir_name, '_')[[1]]
+        sim_i = results_dir_name_parts[length(results_dir_name_parts)]
+        method = paste(results_dir_name_parts[1:(length(results_dir_name_parts)-1)], collapse = '_')
+
+        print(paste(method, sim_i))
+
+        Cbar_1 <- list()
+        Cbar_0 <- list()
+        if (grepl("impute", method)) {
+            Cbar_imputed_1 <- list()
+            Cbar_imputed_0 <- list()
+        }
+        sig_order <- c('SBS2','SBS3','SBS6','SBS13','SBS18')
+
+        for(pi in c(0.2, 0.8)) {
+            pi_st <- as.character(pi)
+
+            Csum_0 <- read.csv(file.path(results_dir, glue("Csum_0_pi{pi}.csv")))
+            Csum_1 <- read.csv(file.path(results_dir, glue("Csum_1_pi{pi}.csv")))
+            counts_0 <- read.csv(file.path(results_dir, glue("counts_0_pi{pi}.csv")))
+            counts_1 <- read.csv(file.path(results_dir, glue("counts_1_pi{pi}.csv")))
+
+            Cbar_1[[pi_st]] <- Csum_1 / counts_1
+            Cbar_0[[pi_st]] <- Csum_0 / counts_0
+
+            if (grepl("impute", method)) {
+                Csum_imputed_0 <- read.csv(file.path(results_dir, glue("Csum_0_imputed_pi{pi}.csv")))
+                Csum_imputed_1 <- read.csv(file.path(results_dir, glue("Csum_1_imputed_pi{pi}.csv")))
+                counts_imputed_0 <- read.csv(file.path(results_dir, glue("counts_0_imputed_pi{pi}.csv")))
+                counts_imputed_1 <- read.csv(file.path(results_dir, glue("counts_1_imputed_pi{pi}.csv")))
+
+                Cbar_imputed_1[[pi_st]] <- Csum_imputed_1 / counts_imputed_1
+                Cbar_imputed_0[[pi_st]] <- Csum_imputed_0 / counts_imputed_0
+            }
+        }
+
+        sim <- readRDS(glue("datasets_0.2/sim_{sim_i}.rds"))
+
+        PAIE_0 <- rbind(PAIE_0, c(method, sim_i, compute_PAIE(Cbar_0, sim, t = 0)))
+        PAIE_1 <- rbind(PAIE_1, c(method, sim_i, compute_PAIE(Cbar_1, sim, t = 1)))
+        if (grepl("impute", method)) {
+            PAIE_imputed_0 <- rbind(PAIE_imputed_0, c(method, sim_i, compute_PAIE(Cbar_imputed_0, sim, t = 0)))
+            PAIE_imputed_1 <- rbind(PAIE_imputed_1, c(method, sim_i, compute_PAIE(Cbar_imputed_1, sim, t = 1)))
+        }
+    }
+
+    colnames(PAIE_0)[1:2] <- c('method', 'sim')
+    colnames(PAIE_1)[1:2] <- c('method', 'sim')
+    PAIE_0 <- data.frame(PAIE_0)
+    PAIE_1 <- data.frame(PAIE_1)
+    write.csv(PAIE_0, file.path(dir, method, "PAIE_0.csv"), row.names = FALSE)
+    write.csv(PAIE_1, file.path(dir, method, "PAIE_1.csv"), row.names = FALSE)
+
+    if (grepl("impute", method)) {    
+        colnames(PAIE_imputed_0)[1:2] <- c('method', 'sim')
+        colnames(PAIE_imputed_1)[1:2] <- c('method', 'sim')
+        PAIE_imputed_0 <- data.frame(PAIE_imputed_0)
+        PAIE_imputed_1 <- data.frame(PAIE_imputed_1)
+        write.csv(PAIE_imputed_0, file.path(dir, method, "PAIE_imputed_0.csv"), row.names = FALSE)
+        write.csv(PAIE_imputed_1, file.path(dir, method, "PAIE_imputed_1.csv"), row.names = FALSE)
+    }
+}
+```
+
+```{r}
+sim <- readRDS(glue("datasets_0.2/sim_1.rds"))
+
+PAIE_0 <- do.call(rbind, lapply(methods, function(method) {
+    read.csv(file.path(dir, method, 'PAIE_0.csv'))
+})) %>%
+    pivot_longer(colnames(sim$params$P), names_to = 'sig', values_to = 'PAIE_0') %>%
+    mutate(
+        sig = factor(sig, levels = simulation_sig_order),
+        method = factor(method, levels = names(method_order), labels = method_order)
+    )
+
+PAIE_1 <- do.call(rbind, lapply(methods, function(method) {
+    read.csv(file.path(dir, method, 'PAIE_1.csv'))
+})) %>%
+    pivot_longer(colnames(sim$params$P), names_to = 'sig', values_to = 'PAIE_1') %>%
+    mutate(
+        sig = factor(sig, levels = simulation_sig_order),
+        method = factor(method, levels = names(method_order), labels = method_order)
+    )
+
+PAIE_imputed_0 <- do.call(rbind, lapply(methods, function(method) {
+    if (grepl('impute', method)) {
+        read.csv(file.path(dir, method, 'PAIE_imputed_0.csv'))
+    }
+})) %>%
+    pivot_longer(colnames(sim$params$P), names_to = 'sig', values_to = 'PAIE_imputed_0') %>%
+    mutate(
+        sig = factor(sig, levels = simulation_sig_order),
+        method = factor(method, levels = names(method_order), labels = method_order)
+    )
+
+PAIE_imputed_1 <- do.call(rbind, lapply(methods, function(method) {
+    if (grepl('impute', method)) {
+        read.csv(file.path(dir, method, 'PAIE_imputed_1.csv'))
+    }
+})) %>%
+    pivot_longer(colnames(sim$params$P), names_to = 'sig', values_to = 'PAIE_imputed_1') %>%
+    mutate(
+        sig = factor(sig, levels = simulation_sig_order),
+        method = factor(method, levels = names(method_order), labels = method_order)
+    )
+```
+
+```{r}
+PAIE_0 %>%
+    ggplot(aes(x = sig, y = PAIE_0, color = method)) +
+    geom_hline(yintercept = 0) +
+    geom_boxplot() +
+    labs(
+        x = 'Signature', 
+        y = 'mPAIE',
+        title = glue("Measured Population Average Indirect Effects (mPAIE)\ncomparing 20% to 80% treated\nAcross 100 datasets"),
+        color = 'Algorithm'
+    ) +
+    set_colors(color_name) +
+    my_theme() +
+    my_color_legend()
+my_save("all_figures/PAIE_0.png")
+
+PAIE_0 %>%
+    filter(method == 'All Data') %>%
+    ggplot(aes(x = sig, y = PAIE_0)) +
+    geom_hline(yintercept = 0) +
+    geom_boxplot() +
+    labs(
+        x = 'Signature', 
+        y = 'mPAIE',
+        title = glue("Measured Population Average Indirect Effects (mPAIE)\ncomparing 20% to 80% treated\nAcross 100 datasets")
+    ) +
+    my_theme()
+my_save("all_figures/PAIE_0_all_data.png")
+
+PAIE_1 %>%
+    ggplot(aes(x = sig, y = PAIE_1, color = method)) +
+    geom_hline(yintercept = 0) +
+    geom_boxplot() +
+    labs(
+        x = 'Signature', 
+        y = 'mPAIE',
+        title = glue("Measured Population Average Indirect Effects (mPAIE)\ncomparing 20% to 80% treated\nAcross 100 datasets"),
+        color = 'Algorithm'
+    ) +
+    set_colors(color_name) +
+    my_theme() +
+    my_color_legend()
+my_save("all_figures/PAIE_1.png")
+
+p <- PAIE_0 %>%
+    ggplot(aes(x = prop_abs, y = method, fill = method)) +
+    geom_density_ridges(alpha = 0.5)
+pb <- ggplot_build(p)
+ridge_data <- pb$data[[1]]  
+means <- PAIE_0 %>%
+  group_by(method) %>%
+  summarise(mean_prop_abs = mean(prop_abs), .groups = "drop")
+mean_lines <- means %>%
+  rowwise() %>%
+  mutate(height = {
+    # Find the ridge group number (from ggplot_build, 1-based index)
+    group_index <- which(levels(factor(PAIE_0$method)) == method)
+
+    # Subset ridge data
+    ridge_subset <- ridge_data[ridge_data$group == group_index, ]
+
+    # Interpolate height at mean
+    approx(ridge_subset$x, ridge_subset$height, xout = mean_prop_abs)$y
+  }) %>%
+  ungroup()
+PAIE_0 %>%
+    ggplot(aes(x = prop_abs, y = method, fill = method, color = method,  height = after_stat(density))) +
+    geom_hline(yintercept = 0) +
+    geom_density_ridges(alpha = 0.5, scale = 1, stat = "density") +
+    geom_segment(
+        data = mean_lines,
+        aes(
+            x = mean_prop_abs,
+            xend = mean_prop_abs,
+            y = as.numeric(factor(method)),
+            yend = as.numeric(factor(method)) + height/ 54, # to get on same scale (by eye)
+            color = method
+        ),
+        inherit.aes = FALSE,
+        size = 1
+    ) + 
+    labs(
+        x = 'Total absolute mPAIE as a proportion of mutations per untreated sample', 
+        y = '',
+        title = glue("Total absolute mPAIE\ncomparing 20% to 80% treated\nAcross 100 datasets"),
+        color = 'Algorithm',
+        fill = 'Algorithm'
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme() +
+    my_fill_legend()
+my_save("all_figures/PAIE_prop_0.png")
+
+PAIE_0 %>%
+    filter(method == 'All Data') %>%
+    ggplot(aes(x = prop_abs)) +
+    geom_hline(yintercept = 0) +
+    geom_histogram(aes(y = ..density..), bins = 30, fill = 'lightgrey', color = 'black') +
+    geom_density(linewidth = 1.2) +
+    labs(
+        x = 'Total absolute mPAIE as a proportion of mutations per untreated sample', 
+        y = '',
+        title = glue("Total absolute mPAIE\ncomparing 20% to 80% treated\nAcross 100 datasets")
+    ) +
+    my_theme()
+my_save("all_figures/PAIE_prop_0_all_data.png")
+
+PAIE_1 %>%
+    ggplot(aes(x = prop_abs, y = method, color = method, fill = method)) +
+    geom_hline(yintercept = 0) +
+    geom_density_ridges() +
+    labs(
+        x = 'Total absolute mPAIE as a proportion of mutations per treated sample', 
+        y = '',
+        title = glue("Total absolute mPAIE\ncomparing 20% to 80% treated\nAcross 100 datasets"),
+        color = 'Algorithm',
+        fill = 'Algorithm'
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme() +
+    my_fill_legend()
+my_save("all_figures/PAIE_prop_1.png")
+```

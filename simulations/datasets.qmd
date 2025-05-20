@@ -1,0 +1,47 @@
+---
+title: "Creating Simulated Datasets"
+format: html
+---
+
+```{r}
+.libPaths("~/apps/R_4.1.0/")
+library(glue)
+
+source("simulate.R")
+simulation_parameters <- readRDS("../application/simulation_parameters_BA.rds")
+
+G = 100
+N = ncol(simulation_parameters$P)
+C0_sd = rep(10, N); names(C0_sd) = colnames(simulation_parameters$P)
+C1_sd = rep(10, N); names(C1_sd) = colnames(simulation_parameters$P)
+C1_sd['SBS3'] = 20
+```
+
+```{r}
+nsim = 100
+pi = 0.2
+for (i in 1:nsim) {
+  set.seed(i)
+  sim <- simulate_BA(
+      simulation_parameters$P, simulation_parameters$C0_dist,
+      simulation_parameters$ATE_C,
+      C0_sd, C1_sd, pi, G
+  )
+  saveRDS(sim, file = file.path("datasets_0.2", glue("sim_{i}.rds")))
+}
+```
+
+
+```{r}
+nsim = 100
+pi = 0.8
+for (i in 1:nsim) {
+  set.seed(i)
+  sim <- simulate_BA(
+      simulation_parameters$P, simulation_parameters$C0_dist,
+      simulation_parameters$ATE_C,
+      C0_sd, C1_sd, pi, G
+  )
+  saveRDS(sim, file = file.path("datasets_0.8", glue("sim_{i}.rds")))
+}
+```

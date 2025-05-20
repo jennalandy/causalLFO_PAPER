@@ -1,0 +1,460 @@
+```{r}
+.libPaths("~/apps/R_4.1.0/")
+library(ggplot2)
+library(tidyverse)
+library(knitr)
+
+source("../visualization.R")
+color_name = 'custom'
+```
+
+```{r}
+dir <- "direct_effects"
+files <- list.files(dir)
+results_files <- files[grepl(".csv", files)]
+
+bootstrapped_results_files <- results_files[grepl("bootstrapped", results_files)]
+bootstrapped_results <- do.call(rbind, lapply(bootstrapped_results_files, function(file) {
+    method <- str_split(file, "_bootstrapped")[[1]][1]
+    pi <- str_split(str_remove(file, ".csv"), "ATE_")[[1]][2]
+
+    res <- read.csv(file.path(dir, file))
+    res$pi <- pi
+    res$method <- method
+    res$sig <- rep(colnames(P), max(res$sim))
+    return(res)
+})) %>%
+    filter(
+        method %in% names(method_order)
+    ) %>%
+    mutate(
+        sig = factor(sig, levels = simulation_sig_order),
+        method = factor(method, levels = names(method_order), labels = method_order),
+        boot = 'Bootstrap Mean'
+    )
+bootstrapped_results %>%
+    group_by(method) %>%
+    summarize(n = length(unique(sim)))
+
+noboot_results_files <- results_files[!grepl("bootstrapped", results_files)]
+noboot_results <- do.call(rbind, lapply(noboot_results_files, function(file) {
+    method <- str_split(file, "_ATE")[[1]][1]
+    pi <- str_split(str_remove(file, ".csv"), "ATE_")[[1]][2]
+
+    res <- read.csv(file.path(dir, file))
+    res$pi <- pi
+    res$method <- method
+    res$sig <- rep(colnames(P), max(res$sim))
+    return(res)
+})) %>%
+    mutate(
+        sig = factor(sig, levels = simulation_sig_order),
+        method = factor(method, levels = names(method_order), labels = method_order),
+        boot = 'Single Estimate'
+    )
+noboot_results %>%
+    group_by(method) %>%
+    summarize(n = length(unique(sim)))
+```
+
+## Standard estimate vs bootstrapped mean 
+```{r}
+bootstrapped_results %>%
+    filter(
+        method != "Impute And Stabilize, Decompose"
+    ) %>%
+    filter(pi == 0.2) %>%
+    select(colnames(noboot_results)) %>%
+    rbind(noboot_results) %>%
+    ggplot(aes(x = sig, y = mean, color = method, fill = method)) +
+    facet_grid(rows = vars(boot), switch = 'y') +
+    truth_boxplot(color = 'black') +
+    geom_boxplot(alpha = 0.1) +
+    labs(
+        x = "Signature",
+        y = "ATE estimate",
+        color = "Algorithm:",
+        fill = "Algorithm:"
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme()
+my_save("all_figures/standard_vs_bootstrap_0.2.png", height_scale = 2)
+
+bootstrapped_results %>%
+    filter(
+        method != "Impute And Stabilize, Decompose"
+    ) %>%
+    filter(pi == 0.8) %>%
+    select(colnames(noboot_results)) %>%
+    rbind(noboot_results) %>%
+    ggplot(aes(x = sig, y = mean, color = method, fill = method)) +
+    facet_grid(rows = vars(boot), switch = 'y') +
+    truth_boxplot(color = 'black') +
+    geom_boxplot(alpha = 0.1) +
+    labs(
+        x = "Signature",
+        y = "ATE estimate",
+        color = "Algorithm:",
+        fill = "Algorithm:"
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme()
+my_save("all_figures/standard_vs_bootstrap_0.8.png", height_scale = 2)
+```
+
+## Bootstrapped mean 
+```{r}
+bootstrapped_results %>%
+    filter(
+        method != "Impute And Stabilize, Decompose"
+    ) %>%
+    filter(pi == 0.2) %>%
+    ggplot(aes(x = sig, y = mean, color = method, fill = method)) +
+    truth_boxplot(color = 'black') +
+    geom_boxplot(alpha = 0.1) +
+    labs(
+        x = "Signature",
+        y = "ATE estimate",
+        color = "Algorithm:",
+        fill = "Algorithm:"
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme() 
+my_save("all_figures/bootstrap_mean_0.2.png")
+
+bootstrapped_results %>%
+    filter(
+        method != "Impute And Stabilize, Decompose"
+    ) %>%
+    filter(pi == 0.8) %>%
+    ggplot(aes(x = sig, y = mean, color = method, fill = method)) +
+    truth_boxplot(color = 'black') +
+    geom_boxplot(alpha = 0.1) +
+    labs(
+        x = "Signature",
+        y = "ATE estimate",
+        color = "Algorithm:",
+        fill = "Algorithm:"
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme()
+my_save("all_figures/bootstrap_mean_0.8.png")
+```
+
+
+## Bootstrap CI width
+```{r}
+bootstrapped_results %>%
+    filter(
+        method != "Impute And Stabilize, Decompose"
+    ) %>%
+    filter(pi == 0.2) %>%
+    mutate(width95 = upper95-lower95) %>%
+    ggplot(aes(x = sig, y = width95, color = method, fill = method)) +
+    geom_hline(yintercept = 0) +
+    geom_boxplot(alpha = 0.2) +
+    labs(
+        x = "Signature",
+        y = "Width of Bootstrapped 95% CI",
+        color = "Algorithm:",
+        fill = "Algorithm:"
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme()
+my_save("all_figures/bootstrap_CI_widths_0.2.png")
+
+bootstrapped_results %>%
+    filter(
+        method != "Impute And Stabilize, Decompose"
+    ) %>%
+    filter(pi == 0.8) %>%
+    mutate(width95 = upper95-lower95) %>%
+    ggplot(aes(x = sig, y = width95, color = method, fill = method)) +
+    geom_hline(yintercept = 0) +
+    geom_boxplot(alpha = 0.2) +
+    labs(
+        x = "Signature",
+        y = "Width of Bootstrapped 95% CI",
+        color = "Algorithm:",
+        fill = "Algorithm:"
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme()
+my_save("all_figures/bootstrap_CI_widths_0.8.png")
+```
+
+```{r}
+bootstrapped_results %>%
+    filter(
+        method != "Impute And Stabilize, Decompose",
+        pi == 0.2
+    ) %>%
+    merge(
+        truth_data %>% rename(true = ATE)
+    ) %>%
+    mutate(
+        captured = true > lower95 & true < upper95
+    ) %>%
+    group_by(sig, method) %>%
+    summarize(
+        coverage = round(mean(captured), 2)
+    ) %>% 
+    pivot_wider(names_from = sig, values_from = coverage) %>%
+    kable(format = 'latex')
+```
+
+## Comparing 0.2 vs 0.8
+```{r}
+comp_results <- bootstrapped_results %>%
+    filter(
+        method != "Impute And Stabilize, Decompose"
+    ) %>%
+    mutate(
+        transparency = ifelse(pi == 0.2, 0, 0.5),
+        g = paste(method, transparency, sig)
+    ) %>%
+    arrange(method, transparency, sig)
+comp_results %>%
+    mutate(g = factor(g, levels = unique(comp_results$g))) %>%
+    ggplot(aes(x = sig, y = mean, color = method, fill = method, alpha = transparency, group = g)) +
+    truth_boxplot() +
+    geom_boxplot(show.legend = FALSE) +
+    scale_alpha_continuous(breaks = c(0.2, 0.8)) + 
+    labs(
+        x = "Signature",
+        y = "ATE estimate",
+        color = "Algorithm:",
+        fill = 'Algorithm:',
+        alpha = "Proportion Treated"
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme() +
+    guides(
+      alpha = guide_legend(
+        override.aes = list(
+          fill = c("transparent", "black"),  # Add shading to the legend
+          alpha = c(0, 0.5)  # Set alpha values for shading (0 and 0.5)
+        ),
+        title = "Proportion Treated"
+      )
+    ) 
+my_save("all_figures/bootstrapped_mean_across_pi.png")
+
+comp_results %>%
+    filter(method == 'All Data') %>%
+    mutate(g = factor(g, levels = unique(comp_results$g))) %>%
+    ggplot(aes(x = sig, y = mean, color = method, fill = method, alpha = transparency, group = g)) +
+    truth_boxplot() +
+    geom_boxplot(show.legend = FALSE) +
+    scale_alpha_continuous(breaks = c(0.2, 0.8)) + 
+    labs(
+        x = "Signature",
+        y = "ATE estimate",
+        color = "Algorithm:",
+        fill = 'Algorithm:',
+        alpha = "Proportion Treated"
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme() +
+    guides(
+      alpha = guide_legend(
+        override.aes = list(
+          fill = c("transparent", "black"),  # Add shading to the legend
+          alpha = c(0, 0.5)  # Set alpha values for shading (0 and 0.5)
+        ),
+        title = "Proportion Treated"
+      )
+    ) 
+my_save("all_figures/bootstrapped_mean_across_pi_all_data.png")
+
+bootstrapped_results %>%
+    filter(
+        method != "Impute And Stabilize, Decompose"
+    ) %>%
+    select(method, pi, sig, mean) %>%
+    group_by(method, pi, sig) %>%
+    summarize(
+        median = median(mean)
+    ) %>%
+    pivot_wider(names_from = pi, values_from = median) %>%
+    mutate(
+        change = (`0.8` - `0.2`)
+    ) %>%
+    ggplot(aes(x = sig, y = change, fill = method)) +
+    geom_bar(stat = "identity", position = 'dodge') +
+    labs(
+        x = "Signature",
+        y = "Change in median ATE estimate\npi = 0.8 - 0.2",
+        fill = "Algorithm"
+    ) +
+    set_fill(color_name)  +
+    my_theme() +
+    my_fill_legend()
+my_save("all_figures/bootstrapped_mean_across_pi_change.png")
+
+bootstrapped_results %>%
+    filter(
+        method != "Impute And Stabilize, Decompose"
+    ) %>%
+    mutate(
+        fill_color = ifelse(pi == 0.2, as.character(method), "transparent"),
+        width95 = upper95-lower95
+    ) %>%
+    ggplot(aes(x = sig, y = width95, color = method, fill = fill_color)) +
+    geom_hline(yintercept = 0) +
+    geom_boxplot(alpha = 0.5) +
+    labs(
+        x = "Signature",
+        y = "ATE estimate",
+        color = "Algorithm",
+        fill = "Algorithm"
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme() +
+    my_color_legend()
+my_save("all_figures/bootstrapped_widths_across_pi.png")
+```
+
+## Direct comparison NNLS vs Decompose
+
+```{r}
+max_sim = max(bootstrapped_results[bootstrapped_results$method == "Impute And Stabilize, Decompose",'sim'])
+
+bootstrapped_results %>%
+    filter(
+        method %in% c("Impute And Stabilize, Decompose", "Impute And Stabilize"),
+        sim <= max_sim
+    ) %>%
+    mutate(pi = paste("pi =", pi)) %>%
+    ggplot(aes(x = sig, y = mean, color = method)) +
+    facet_grid(rows = vars(pi)) +
+    truth_boxplot(color = 'black') +
+    geom_boxplot(alpha = 0) +
+    labs(
+        x = "Signature",
+        y = "ATE estimate",
+        color = "Algorithm:"
+    ) +
+    set_colors(color_name) +
+    my_theme() +
+    my_color_legend()
+my_save("all_figures/bootstrapped_mean_decompose.png", height_scale = 1.5)
+
+bootstrapped_results %>%
+    filter(
+        method %in% c("Impute And Stabilize, Decompose", "Impute And Stabilize"),
+        sim <= max_sim
+    ) %>%
+    mutate(
+        width95 = upper95-lower95,
+        pi = paste("pi =", pi)
+    ) %>%
+    ggplot(aes(x = sig, y = width95, color = method)) +
+    facet_grid(rows = vars(pi)) +
+    geom_hline(yintercept = 0) +
+    geom_boxplot(alpha = 0) +
+    labs(
+        x = "Signature",
+        y = "95% Confidence Interval Width",
+        color = "Algorithm:"
+    ) +
+    set_colors(color_name) +
+    my_theme() +
+    my_color_legend()
+my_save("all_figures/bootstrapped_CI_width_decompose.png", height_scale = 1.5)
+```
+
+## Direct comparison with same NMF sample size: stabilize vs random split
+
+```{r}
+res <- do.call(rbind, lapply(bootstrapped_results_files, function(file) {
+    method <- str_split(file, "_bootstrapped")[[1]][1]
+    pi <- str_split(str_remove(file, ".csv"), "ATE_")[[1]][2]
+
+    res <- read.csv(file.path(dir, file))
+    res$pi <- pi
+    res$method <- method
+    res$sig <- rep(colnames(P), max(res$sim))
+    return(res)
+})) %>%
+    filter(
+        method %in% c('random_split_and_nmf_smallsplit', 'stabilize')
+    ) %>%
+    mutate(
+        method = ifelse(method == 'random_split_and_nmf_smallsplit', 'random_split_and_nmf', method),
+        sig = factor(sig, levels = simulation_sig_order),
+        method = factor(method, levels = names(method_order), labels = method_order),
+        boot = 'Bootstrap Mean'
+    )
+
+res %>%
+    mutate(
+        fill_color = ifelse(pi == 0.2, as.character(method), "transparent"),
+    ) %>%
+    ggplot(aes(x = sig, y = mean, color = method, fill = fill_color)) +
+    truth_boxplot(color = 'black') +
+    geom_boxplot(alpha = 0.5) +
+    labs(
+        x = "Signature",
+        y = "ATE estimate",
+        color = "Algorithm",
+        fill = "Algorithm"
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme() +
+    my_color_legend()
+my_save("all_figures/bootstrapped_mean_across_pi_DIRECT.png")
+
+res %>%
+    select(method, pi, sig, mean) %>%
+    group_by(method, pi, sig) %>%
+    summarize(
+        median = median(mean)
+    ) %>%
+    pivot_wider(names_from = pi, values_from = median) %>%
+    mutate(
+        change = (`0.8` - `0.2`)
+    ) %>%
+    ggplot(aes(x = sig, y = change, fill = method)) +
+    geom_bar(stat = "identity", position = 'dodge') +
+    labs(
+        x = "Signature",
+        y = "Change in median ATE estimate\npi = 0.8 - 0.2",
+        fill = "Algorithm"
+    ) +
+    set_fill(color_name)  +
+    my_theme() +
+    my_fill_legend()
+my_save("all_figures/bootstrapped_mean_across_pi_change_DIRECT.png")
+
+
+res %>%
+    mutate(
+        fill_color = ifelse(pi == 0.2, as.character(method), "transparent"),
+        width95 = upper95-lower95
+    ) %>%
+    ggplot(aes(x = sig, y = width95, color = method, fill = fill_color)) +
+    geom_hline(yintercept = 0) +
+    geom_boxplot(alpha = 0.5) +
+    labs(
+        x = "Signature",
+        y = "ATE estimate",
+        color = "Algorithm",
+        fill = "Algorithm"
+    ) +
+    set_colors(color_name) +
+    set_fill(color_name) +
+    my_theme() +
+    my_color_legend()
+my_save("all_figures/bootstrapped_widths_across_pi_DIRECT.png")
+```

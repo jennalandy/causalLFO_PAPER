@@ -1,0 +1,142 @@
+---
+title: "Application-based simulation setup"
+format: html
+---
+
+```{r}
+.libPaths("~/apps/R_4.1.0/")
+library(NMF)
+library(bayesNMF)
+library(tidyverse)
+library(knitr)
+library(glue)
+
+knitr::opts_chunk$set(dev = "ragg_png", echo = TRUE, fig.show = "hold")
+
+cosmic <- bayesNMF::get_cosmic()
+application_dir <- "."
+figures_dir <- "application_based_simulations_figures"
+```
+
+## Load Breast AdenoCarcinoma Data
+
+```{r}
+M <- read.csv(file.path(application_dir, "M_BA.csv"))
+Tr <- read.csv(file.path(application_dir, "T_BA.csv"))
+Tr_sub45 <- read.csv(file.path(application_dir, "T_BA_sub45.csv"))
+
+M_sub45 <- M[,paste0("Breast.AdenoCA..", Tr_sub45$tumor_wgs_icgc_specimen_id)]
+
+head(Tr)
+```
+
+```{r}
+untreated_IDs <- Tr_sub45 %>% 
+  filter(BA_T == FALSE) %>%
+  mutate(
+    # to match colnames of M
+    tumor_wgs_icgc_specimen_id = paste0("Breast.AdenoCA..", tumor_wgs_icgc_specimen_id) 
+  ) %>%
+  pull(tumor_wgs_icgc_specimen_id)
+
+M_sub45_untreated <- M_sub45[, untreated_IDs]
+dim(M_sub45_untreated)
+```
+
+## Choosing Latent Rank
+
+We perform the same rank choosing strategies on all data combined and on untreated data only. Both yield the same conclusion with a **selected rank N = 5**. This rank balances optimizing traditional NMF metrics as well as BIC assuming a Poisson likelihood.
+
+```{r}
+nmf_rescale_align <- function(M, N, nrun = 10) {
+  nmf_out <- NMF::nmf(M, rank = N, nrun = nrun)
+  Phat <- nmf_out@fit@W
+  Ehat <- nmf_out@fit@H
+  
+  Ehat <- sweep(Ehat, 1, colSums(Phat), '*')
+  Phat <- sweep(Phat, 2, colSums(Phat), '/')
+  stopifnot(all(abs(colSums(Phat) - 1) < 0.001))
+  
+  sim_mat <- bayesNMF::pairwise_sim(Phat, cosmic)
+  assigned <- bayesNMF::assign_signatures(sim_mat)
+  
+  colnames(Phat) <- colnames(assigned)
+  rownames(Ehat) <- colnames(assigned)
+
+  return(list(
+    nmf = nmf_out,
+    Phat = Phat,
+    Ehat = Ehat,
+    sim_mat = assigned
+  ))
+}
+
+plot_Ehat <- function(Ehat) {
+  t(Ehat) %>% 
+    data.frame() %>%
+    pivot_longer(1:N, names_to = 'sig', values_to = 'estimated_C') %>%
+    ggplot(aes(x = estimated_C)) +
+    facet_grid(rows = vars(sig), switch = 'y') +
+    geom_histogram() +
+    theme(
+      text = element_text(size = 30),
+      strip.text.y.left = element_text(angle = 0)
+    )
+}
+```
+
+### Using all data
+
+Run NMF for ranks 1-15 with 10 runs per rank and plot metrics
+
+```{r}
+set.seed(321)
+rank_sel_nmf <- NMF::nmf(M_sub45, rank = 1:15, nrun = 10)
+
+png(file.path(figures_dir, "rank_sel_nmf_BA_sub45.png"), width = 800, height = 600)
+plot(rank_sel_nmf)
+dev.off()
+
+BICs <- sapply(1:15, function(rank) {
+  Phat = rank_sel_nmf$fit[[as.character(rank)]]@fit@W
+  Ehat = rank_sel_nmf$fit[[as.character(rank)]]@fit@H
+  Mhat = Phat %*% Ehat
+  loglik = sum(sapply(1:ncol(M), function(g) {
+    sum(dpois(M[,g], Mhat[,g], log = TRUE))
+  }))
+
+  k = rank*(nrow(M) + ncol(M)) # number of parameters 
+  n = ncol(M)                  # number of samples
+  BIC = k*log(n) - 2*loglik
+  return(BIC)
+})
+png(file.path(figures_dir, "BICs_BA_sub45.png"), width = 800, height = 600)
+plot(BICs, xlab = "rank", ylab = "BIC")
+lines(BICs)
+abline(v = which(BICs == min(BICs)))
+dev.off()
+
+which(BICs == min(BICs))
+
+which(BICs < min(BICs)*1.05)
+which(BICs < min(BICs)*1.01)
+```
+
+Optimizing BIC gives N = 7, but many ranks are very close (\<5% increase away) to the minimum. Optimizing cophenetic and basis sparsity gives N = 4 or 5. Dispersion and silhouette aren't great for N = 4 or 5 but there are sharp drops right after it. This is also a second elbow of evar and rss.
+
+```{r}
+MaxCos <- sapply(1:15, function(rank) {
+  if (rank == 1) {
+    return(0)
+  }
+  Phat = rank_sel_nmf$fit[[as.character(rank)]]@fit@W
+  sim = pairwise_sim(Phat, Phat)
+  max_cos = max(sim[lower.tri(sim)])
+  return(max_cos)
+})
+png(file.path(figures_dir, "MaxCos_BA_sub45.png"), width = 800, height = 600)
+plot(MaxCos, xlab = "rank", ylab = "Max Cosine Sim")
+lines(MaxCos)
+abline(h = 0.7)
+dev.off()
+```

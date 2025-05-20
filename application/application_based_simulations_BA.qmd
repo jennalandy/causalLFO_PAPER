@@ -1,0 +1,397 @@
+---
+title: "Application-based simulation setup"
+format: html
+---
+
+```{r}
+.libPaths("~/apps/R_4.1.0/")
+library(NMF)
+library(bayesNMF)
+library(tidyverse)
+library(knitr)
+library(glue)
+
+knitr::opts_chunk$set(dev = "ragg_png", echo = TRUE, fig.show = "hold")
+
+cosmic <- bayesNMF::get_cosmic()
+application_dir <- "."
+figures_dir <- "application_based_simulations_figures"
+```
+
+## Load Breast AdenoCarcinoma Data
+
+```{r}
+M <- read.csv(file.path(application_dir, "M_BA.csv"))
+Tr <- read.csv(file.path(application_dir, "T_BA.csv"))
+Tr_sub45 <- read.csv(file.path(application_dir, "T_BA_sub45.csv"))
+
+M_sub45 <- M[,paste0("Breast.AdenoCA..", Tr_sub45$tumor_wgs_icgc_specimen_id)]
+
+head(Tr)
+```
+
+```{r}
+untreated_IDs <- Tr %>% 
+  filter(BA_T == FALSE) %>%
+  mutate(
+    # to match colnames of M
+    tumor_wgs_icgc_specimen_id = paste0("Breast.AdenoCA..", tumor_wgs_icgc_specimen_id) 
+  ) %>%
+  pull(tumor_wgs_icgc_specimen_id)
+
+M_untreated <- M[, untreated_IDs]
+dim(M_untreated)
+```
+
+## Choosing Latent Rank
+
+We perform the same rank choosing strategies on all data combined and on untreated data only. Both yield the same conclusion with a **selected rank N = 5**. This rank balances optimizing traditional NMF metrics as well as BIC assuming a Poisson likelihood.
+
+```{r}
+nmf_rescale_align <- function(M, N, nrun = 10) {
+  nmf_out <- NMF::nmf(M, rank = N, nrun = nrun)
+  Phat <- nmf_out@fit@W
+  Ehat <- nmf_out@fit@H
+  
+  Ehat <- sweep(Ehat, 1, colSums(Phat), '*')
+  Phat <- sweep(Phat, 2, colSums(Phat), '/')
+  stopifnot(all(abs(colSums(Phat) - 1) < 0.001))
+  
+  sim_mat <- bayesNMF::pairwise_sim(Phat, cosmic)
+  assigned <- bayesNMF::assign_signatures(sim_mat)
+  
+  colnames(Phat) <- colnames(assigned)
+  rownames(Ehat) <- colnames(assigned)
+
+  return(list(
+    nmf = nmf_out,
+    Phat = Phat,
+    Ehat = Ehat,
+    sim_mat = assigned
+  ))
+}
+
+plot_Ehat <- function(Ehat) {
+  t(Ehat) %>% 
+    data.frame() %>%
+    pivot_longer(1:N, names_to = 'sig', values_to = 'estimated_C') %>%
+    ggplot(aes(x = estimated_C)) +
+    facet_grid(rows = vars(sig), switch = 'y') +
+    geom_histogram() +
+    theme(
+      text = element_text(size = 30),
+      strip.text.y.left = element_text(angle = 0)
+    )
+}
+```
+
+### Using all data
+
+Run NMF for ranks 1-15 with 10 runs per rank and plot metrics
+
+```{r}
+set.seed(321)
+rank_sel_nmf <- NMF::nmf(M, rank = 1:15, nrun = 10)
+
+png(file.path(figures_dir, "rank_sel_nmf_BA.png"), width = 800, height = 600)
+plot(rank_sel_nmf)
+dev.off()
+
+BICs <- sapply(1:15, function(rank) {
+  Phat = rank_sel_nmf$fit[[as.character(rank)]]@fit@W
+  Ehat = rank_sel_nmf$fit[[as.character(rank)]]@fit@H
+  Mhat = Phat %*% Ehat
+  loglik = sum(sapply(1:ncol(M), function(g) {
+    sum(dpois(M[,g], Mhat[,g], log = TRUE))
+  }))
+
+  k = rank*(nrow(M) + ncol(M)) # number of parameters 
+  n = ncol(M)                  # number of samples
+  BIC = k*log(n) - 2*loglik
+  return(BIC)
+})
+png(file.path(figures_dir, "BICs_BA.png"), width = 800, height = 600)
+plot(BICs, xlab = "rank", ylab = "BIC")
+lines(BICs)
+abline(v = which(BICs == min(BICs)))
+dev.off()
+
+which(BICs == min(BICs))
+
+which(BICs < min(BICs)*1.05)
+which(BICs < min(BICs)*1.01)
+```
+
+Optimizing BIC gives N = 7, but many ranks are very close (\<5% increase away) to the minimum. Optimizing cophenetic and basis sparsity gives N = 4 or 5. Dispersion and silhouette aren't great for N = 4 or 5 but there are sharp drops right after it. This is also a second elbow of evar and rss.
+
+```{r}
+MaxCos <- sapply(1:15, function(rank) {
+  if (rank == 1) {
+    return(0)
+  }
+  Phat = rank_sel_nmf$fit[[as.character(rank)]]@fit@W
+  sim = pairwise_sim(Phat, Phat)
+  max_cos = max(sim[lower.tri(sim)])
+  return(max_cos)
+})
+png(file.path(figures_dir, "MaxCos_BA.png"), width = 800, height = 600)
+plot(MaxCos, xlab = "rank", ylab = "Max Cosine Sim")
+lines(MaxCos)
+abline(h = 0.7)
+dev.off()
+```
+
+This plot shows the maximum cosine similarity between two estimated signatures. We place a horizontal line at cosine similarity = 0.7, values above which indicate likely duplicate signatures. This seems to place a cap at a rank of N = 5.
+
+For N = 4, 5, 7, run NMF again, rescale P to sum to 1, align to COSMIC, and plot exposures per signature
+
+```{r}
+N = 4
+set.seed(321)
+nmf_out <- nmf_rescale_align(M, N)
+nmf_out$sim_mat
+
+get_heatmap(nmf_out$Phat, cosmic)
+ggsave(file.path(figures_dir, "heatmap_N4_BA.png"))
+
+plot_Ehat(nmf_out$Ehat)
+ggsave(file.path(figures_dir, "Ehat_N4_BA.png"))
+
+BICs[4]
+(BICs[4] - BICs[7])/BICs[7]
+```
+
+N = 4 has one signature not well aligned to COSMIC
+
+```{r}
+N = 5
+set.seed(321)
+nmf_out <- nmf_rescale_align(M, N)
+nmf_out$sim_mat
+
+get_heatmap(nmf_out$Phat, cosmic)
+ggsave(file.path(figures_dir, "heatmap_N5_BA.png"))
+
+plot_Ehat(nmf_out$Ehat)
+ggsave(file.path(figures_dir, "Ehat_N5_BA.png"))
+
+BICs[5]
+(BICs[5] - BICs[7])/BICs[7]
+```
+
+N = 5 has better alignment to COSMIC, and BIC is within 1.5% of minimum
+
+```{r}
+N = 6
+set.seed(321)
+nmf_out <- nmf_rescale_align(M, N)
+nmf_out$sim_mat
+
+get_heatmap(nmf_out$Phat, cosmic)
+ggsave(file.path(figures_dir, "heatmap_N6_BA.png"))
+
+plot_Ehat(nmf_out$Ehat)
+ggsave(file.path(figures_dir, "Ehat_N6_BA.png"))
+
+BICs[6]
+(BICs[6] - BICs[7])/BICs[7]
+```
+
+```{r}
+N = 7
+set.seed(321)
+nmf_out <- nmf_rescale_align(M, N)
+nmf_out$sim_mat
+
+get_heatmap(nmf_out$Phat, cosmic)
+ggsave(file.path(figures_dir, "heatmap_N7_BA.png"))
+
+plot_Ehat(nmf_out$Ehat)
+ggsave(file.path(figures_dir, "Ehat_N7_BA.png"))
+
+BICs[7]
+```
+
+N = 7 seems to have a duplicate signature (SBS3 and 40)
+
+### Using untreated samples only
+
+Run NMF for ranks 1-15 with 10 runs per rank and plot metrics
+
+```{r}
+set.seed(321)
+rank_sel_nmf_untreated <- NMF::nmf(M_untreated, rank = 1:15, nrun = 10)
+
+png(file.path(figures_dir, "rank_sel_nmf_untreated_BA.png"), width = 800, height = 600)
+plot(rank_sel_nmf_untreated)
+dev.off()
+
+BICs_untreated <- sapply(1:15, function(rank) {
+  Phat = rank_sel_nmf_untreated$fit[[as.character(rank)]]@fit@W
+  Ehat = rank_sel_nmf_untreated$fit[[as.character(rank)]]@fit@H
+  Mhat = Phat %*% Ehat
+  loglik = sum(sapply(1:ncol(M_untreated), function(g) {
+    sum(dpois(M_untreated[,g], Mhat[,g], log = TRUE))
+  }))
+
+  k = rank*(nrow(M_untreated) + ncol(M_untreated)) # number of parameters 
+  n = ncol(M_untreated)                            # number of samples
+  BIC = k*log(n) - 2*loglik
+  return(BIC)
+})
+png(file.path(figures_dir, "BICs_untreated_BA.png"), width = 800, height = 600)
+plot(BICs_untreated, xlab = "rank", ylab = "BIC")
+abline(v = which(BICs_untreated == min(BICs_untreated)))
+lines(BICs_untreated)
+dev.off()
+
+which(BICs_untreated == min(BICs_untreated))
+
+which(BICs_untreated < min(BICs_untreated)*1.05)
+which(BICs_untreated < min(BICs_untreated)*1.01)
+```
+
+```{r}
+MaxCos_untreated <- sapply(1:15, function(rank) {
+  if (rank == 1) {
+    return(0)
+  }
+  Phat = rank_sel_nmf_untreated$fit[[as.character(rank)]]@fit@W
+  sim = pairwise_sim(Phat, Phat)
+  max_cos = max(sim[lower.tri(sim)])
+  return(max_cos)
+})
+png(file.path(figures_dir, "MaxCos_untreated_BA.png"), width = 800, height = 600)
+plot(MaxCos_untreated, xlab = "rank", ylab = "Max Cosine Sim")
+lines(MaxCos_untreated)
+abline(h = 0.7)
+dev.off()
+```
+
+Same as before!
+
+For N = 4, 5, 7, run NMF again, rescale P to sum to 1, align to COSMIC, and plot exposures per signature
+
+```{r}
+N = 4
+set.seed(321)
+nmf_out <- nmf_rescale_align(M_untreated, N)
+nmf_out$sim_mat
+
+get_heatmap(nmf_out$Phat, cosmic)
+ggsave(file.path(figures_dir, "heatmap_N4_untreated_BA.png"))
+
+plot_Ehat(nmf_out$Ehat)
+ggsave(file.path(figures_dir, "Ehat_N4_untreated_BA.png"))
+
+BICs_untreated[4]
+(BICs_untreated[4] - BICs_untreated[7])/BICs_untreated[7]
+```
+
+N = 4 has one signature not well aligned to COSMIC
+
+```{r}
+N = 5
+set.seed(321)
+nmf_out <- nmf_rescale_align(M_untreated, N)
+nmf_out$sim_mat
+
+get_heatmap(nmf_out$Phat, cosmic)
+ggsave(file.path(figures_dir, "heatmap_N5_untreated_BA.png"))
+
+plot_Ehat(nmf_out$Ehat)
+ggsave(file.path(figures_dir, "Ehat_N5_untreated_BA.png"))
+
+BICs_untreated[5]
+(BICs_untreated[5] - BICs_untreated[7])/BICs_untreated[7]
+```
+
+N = 5 has better alignment to COSMIC, and BIC is within 1.5% of minimum
+
+```{r}
+N = 6
+set.seed(321)
+nmf_out <- nmf_rescale_align(M_untreated, N)
+nmf_out$sim_mat
+
+
+get_heatmap(nmf_out$Phat, cosmic)
+ggsave(file.path(figures_dir, "heatmap_N6_untreated_BA.png"))
+
+plot_Ehat(nmf_out$Ehat)
+ggsave(file.path(figures_dir, "Ehat_N6_untreated_BA.png"))
+
+BICs_untreated[6]
+```
+
+```{r}
+N = 7
+set.seed(321)
+nmf_out <- nmf_rescale_align(M_untreated, N)
+nmf_out$sim_mat
+
+
+get_heatmap(nmf_out$Phat, cosmic)
+ggsave(file.path(figures_dir, "heatmap_N7_untreated_BA.png"))
+
+plot_Ehat(nmf_out$Ehat)
+ggsave(file.path(figures_dir, "Ehat_N7_untreated_BA.png"))
+
+BICs_untreated[7]
+```
+
+N = 7 seems to have a duplicate signature (SBS3 and 37)
+
+## Fixing Signatures
+
+We fix signatures as the reference COSMIC signatures that best align to the NMF results with chosen rank N = 5.
+
+```{r}
+N = 5
+set.seed(321)
+nmf_out <- nmf_rescale_align(M_untreated, N)
+
+fixed_P = cosmic[,colnames(nmf_out$P)]
+colnames(fixed_P)
+```
+
+## Sampling Distribution of Untreated Contributions
+
+```{r}
+fixed_C0_dist <- do.call(cbind, lapply(1:ncol(M_untreated), function(g) {
+  nnls::nnls(A = fixed_P, b = M_untreated[,g])$x
+}))
+rownames(fixed_C0_dist) = colnames(fixed_P)
+dim(fixed_C0_dist)
+
+plot_Ehat(fixed_C0_dist)
+ggsave(file.path(figures_dir, "fixed_C0_dist_BA.png"), height = 13, width = 8)
+```
+
+```{r}
+sd_above = 4
+
+todrop = rep(0, ncol(fixed_C0_dist))
+for (n in 1:N) {
+  print(colnames(fixed_P)[n])
+  upper = mean(fixed_C0_dist[n,]) + sd_above*sd(fixed_C0_dist[n,])
+  todrop = todrop + (fixed_C0_dist[n,] > upper)
+}
+mean(todrop > 0)
+sum(todrop > 0)
+
+plot_Ehat(fixed_C0_dist[,todrop == 0])
+ggsave(file.path(figures_dir, "fixed_C0_dist_filtered_BA.png"), height = 13, width = 8)
+```
+
+## Save simulation parameters to .rds file
+
+```{r}
+simulation_parameters <- list(
+  P = fixed_P, 
+  C0_dist = fixed_C0_dist, 
+  ATE_C = ATE_C, 
+  ATE_C_sd = ATE_C_sd
+)
+saveRDS(simulation_parameters, file = file.path(application_dir, "simulation_parameters_BA.rds"))
+```
