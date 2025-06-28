@@ -1,6 +1,6 @@
 ## Causal Inference for Latent Factor-Modeled Outcomes
 
-This directory contains the code needed to reproduce all simulation studies and the data application from the paper "Causal Inference for Latent Factor-Modeled Outcomes". 
+This directory contains the code needed to reproduce all simulation studies and the data application from [the paper "Causal Inference for Latent Factor-Modeled Outcomes"](https://arxiv.org/abs/2506.20549). For the R package, see the [causalLFO](https://github.com/jennalandy/causalLFO) repository. 
 
 We are unable to share the dataset or simulation parameters publicly, as they rely on private ICGC ARGO data, but we provide all processing code here that can be used by individuals with approval to access the private ICGC ARGO data. Publicly available mutational counts data for the 96-alphabet mutation classification can be accessed from ICGC ARGO (`WGS_PCAWG_2018_02_09/WGS_PCAWG.96.csv`, [instructions here](https://docs.icgc-argo.org/docs/data-access/icgc-25k-data#open-release-data---object-bucket-details)). If granted access to the private ICGC ARGO data, users can access the legacy PCAWG data through the SFTP server. The `germline_variations` subdirectory contains the results of germline mutation calling (`pcawg8.snps.indels.svs.phased.icgc.v2.controlled.vcf.gz`). The `donors_and_biospecimens` subdirectory contains age information as well as a mapping between tumor WGS ICGC specimen IDs and the normal tissue WGS aliquot IDs (`pcawg-data-releases.xlsx`).
 
